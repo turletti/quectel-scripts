@@ -1,0 +1,17 @@
+#!/bin/bash
+
+echo "identifying hub for USB 3"
+uhubctl|grep "USB 3"
+
+echo "Powering off hub 2 for 5s"
+echo "uhubctl -l 2 -a off"
+uhubctl -l 2 -a off
+
+echo "Powering on hub 2, then wait 30s to let the Quectel back to life"
+echo "uhubctl -l 2 -a on"
+uhubctl -l 2 -a on
+
+echo "reset in progress..."
+sleep 30
+
+echo "Quectel hard reset done!"

@@ -1,0 +1,6 @@
+#!/bin/bash
+
+set-ue-mode --mode=mbim
+usb_modeswitch -v 0x2c7c -p 0x0800 -R
+echo "check current loaded driver"
+cat /sys/kernel/debug/usb/devices|grep 'Driver='|grep -vwE 'option|hub'

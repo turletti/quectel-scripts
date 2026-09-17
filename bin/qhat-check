@@ -1,0 +1,156 @@
+#!/usr/bin/expect -f
+#
+# qhat-check — full modem diagnostic with NSSAI 
+#
+
+# ----------------------------------------------------------
+# CLI options
+# ----------------------------------------------------------
+set port "/dev/ttyUSB2"
+set speed 460800
+
+if {$argc >= 2} {
+    if {[lindex $argv 0] eq "--port"} {
+        set port [lindex $argv 1]
+    }
+}
+
+# ----------------------------------------------------------
+# Setup
+# ----------------------------------------------------------
+log_user 0
+set timeout 2
+set output ""
+
+puts "🔍 qhat-check — full modem diagnostic on $port\n"
+
+# Launch microcom
+spawn microcom -f -s $speed -p $port
+expect {
+    "connected" {
+        puts "✅ Connected to $port\n"
+    }
+    timeout {
+        puts "❌ Unable to connect to $port"
+        exit 1
+    }
+}
+
+# ----------------------------------------------------------
+# Helper proc
+# ----------------------------------------------------------
+proc atcmd {cmd desc} {
+    global output
+    puts "➡️  $desc ($cmd)\n"
+    send "$cmd\r"
+    set response ""
+
+    expect {
+        -timeout 1
+        -re "(OK|ERROR)" {
+            append response $expect_out(buffer)
+            append output "\n$cmd\n$response\n"
+        }
+        timeout {
+            append output "\n$cmd\nTIMEOUT\n"
+        }
+    }
+}
+
+# ----------------------------------------------------------
+# Full AT command sequence
+# ----------------------------------------------------------
+set cmds {
+    {"Device Info" "ATI"}
+    {"IMEI" "AT+CGSN"}
+    {"IMSI" "AT+CIMI"}
+    {"ICCID" "AT+CCID"}
+    {"SIM Status" "AT+CPIN?"}
+    {"APN Profiles" "AT+CGDCONT?"}
+    {"Network Info" "AT+QNWINFO"}
+    {"Serving Cell" "AT+QENG=\"servingcell\""}
+    {"USB Mode" "AT+QCFG=\"usbnet\""}
+    {"Preferred Mode" "AT+QNWPREFCFG=\"mode_pref\""}
+    {"LTE Bands" "AT+QNWPREFCFG=\"lte_band\""}
+    {"NR5G Bands" "AT+QNWPREFCFG=\"nr5g_band\""}
+    {"4G Registration" "AT+CREG?"}
+    {"5G Registration" "AT+C5GREG?"}
+    {"NSSAI Info" "AT+QNASCONFIG?"}
+}
+
+foreach pair $cmds {
+    atcmd [lindex $pair 1] [lindex $pair 0]
+}
+
+# Quit microcom
+send "\035"
+send "quit\r"
+
+# ----------------------------------------------------------
+# Python Parsing
+# ----------------------------------------------------------
+puts "\n🔍 Parsing collected data...\n"
+
+set py_script {
+import re, sys
+data = sys.stdin.read()
+
+def safe_find(pattern, label, transform=None, multiline=False):
+    flags = re.S if multiline else 0
+    m = re.search(pattern, data, flags)
+    if m and m.groups():
+        value = m.group(1).strip()
+        if transform:
+            value = transform(value)
+        print(f"{label}: {value}")
+    else:
+        print(f"{label}: not found")
+
+def usb_mode_translate(val):
+    try:
+        n = int(val)
+        modes = {0: "USB default", 1: "QMI", 2: "MBIM", 3: "RNDIS", 5: "ECM"}
+        return f"{val} ({modes.get(n, 'Unknown')})"
+    except:
+        return val
+
+print("===== Parsed Data =====")
+safe_find(r'Revision:\s*(.*?)\n', "Modem Revision")
+safe_find(r'AT\+CGSN.*?(\d{10,})', "IMEI", multiline=True)
+safe_find(r'AT\+CIMI.*?(\d{10,})', "IMSI", multiline=True)
+safe_find(r'AT\+CCID.*?(\d{10,})', "ICCID", multiline=True)
+safe_find(r'\+CPIN:\s*(\w+)', "SIM Status")
+
+# --- APN / DNN Profiles full display + NSSAI extraction ---
+print("APN Profiles / DNN:")
+profiles = re.findall(r'(\+CGDCONT: [^\n]+)', data)
+if profiles:
+    for p in profiles:
+        print(p)
+        # NSSAI pattern example: "01.000002"
+        m = re.search(r'"(\d{2}\.\d{6})"', p)
+        if m:
+            print(f" → NSSAI: {m.group(1)}")
+else:
+    print("  not found")
+
+nssais = re.findall(r'"(\d{2}\.\d{6})"', data)
+if nssais:
+    print(f"NSSAI Info: {', '.join(sorted(set(nssais)))}")
+else:
+    safe_find(r'\+QNASCONFIG:\s*(.*?)(OK|ERROR)', "NSSAI Info", multiline=True)
+safe_find(r'\+QNWINFO:\s*\"([^\"]+)\"', "Network Info")
+safe_find(r'\+QENG:.*', "Serving Cell")
+safe_find(r'\+QCFG:\s*\"usbnet\",\s*(\d+)', "USB Mode", usb_mode_translate)
+safe_find(r'\+QNWPREFCFG:\s*\"mode_pref\",([^\n]*)', "Preferred Mode")
+safe_find(r'\+QNWPREFCFG:\s*\"lte_band\",([^\n]*)', "LTE Bands")
+safe_find(r'\+QNWPREFCFG:\s*\"nr5g_band\",([^\n]*)', "NR5G Bands")
+safe_find(r'\+CREG:\s*([^\n]*)', "4G Registration")
+safe_find(r'\+C5GREG:\s*([^\n]*)', "5G Registration")
+print("========================")
+}
+
+set parsed [exec echo $output | python3 -c $py_script]
+puts "$parsed\n"
+
+puts "✅ Diagnostic complete.\n"

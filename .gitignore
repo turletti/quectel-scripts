@@ -1,0 +1,10 @@
+# macOS
+.DS_Store
+
+# Python (ci_ctl_qtel.py)
+__pycache__/
+*.py[cod]
+
+# éditeurs
+*.swp
+*~

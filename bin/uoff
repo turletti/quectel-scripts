@@ -1,0 +1,3 @@
+#!/bin/bash
+echo "power off Quectel USB3 port"
+uhubctl -l 2 -p 1 -a off
