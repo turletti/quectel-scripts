@@ -1,8 +1,8 @@
 # quectel-scripts
 
-Configuration scripts for Quectel modules (5G UE) on R2Lab / SophiaNode nodes.
+Configuration scripts for Quectel modules (5G UE) on R2lab FIT nodes.
 
-## Install on a node as root
+## Install on a node
 
 ```bash
 git clone https://github.com/turletti/quectel-scripts.git /opt/quectel-scripts
