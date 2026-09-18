@@ -25,3 +25,7 @@ make install
 - `make list`      — current version + list of scripts
 
 The version is derived from git tags (`git describe`).
+
+## Do no forget to tag and push tag after each commit
+
+- git tag -a vX.Y.Z -m "...."; git push --tags
