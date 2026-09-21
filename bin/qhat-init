@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import os, time, serial, argparse, subprocess
 from datetime import datetime
+
 RESET = "\033[0m"
 COLORS = {
     "info": "\033[94m",
@@ -9,6 +10,7 @@ COLORS = {
     "err": "\033[91m",
     "dim": "\033[90m",
 }
+
 # Per-model configuration. Only the usb_modeswitch product-id (QMI path) is
 # model-specific; DNN/NSSAI, NR5G bands and the MBIM sequence are common.
 #   qmi_pid      : Quectel product id used by usb_modeswitch when forcing QMI
@@ -16,51 +18,81 @@ COLORS = {
 MODEL_CONFIG = {
     "RM500Q":  {"qmi_pid": "0x0800", "default_mode": "mbim"},
     "RM520N":  {"qmi_pid": "0x0801", "default_mode": "mbim"},
-    "RG255C":  {"qmi_pid": "0x0800", "default_mode": "qmi"},
+    "RG255C":  {"qmi_pid": "0x0316", "default_mode": "qmi"},
     "Unknown": {"qmi_pid": "0x0800", "default_mode": "mbim"},
 }
+
 # NR5G bands applied to every MBIM modem (RM500Q and RM520N both support these;
 # a modem that rejects the list simply keeps all bands, so n78 stays available).
 DEFAULT_NR5G_BAND = "1:2:3:77:78:79"
+
 def log(msg, level="info", color=False):
     """Colored timestamp logger"""
     ts = datetime.now().strftime("[%Y-%m-%d %H:%M:%S]")
     c = COLORS.get(level, "") if color else ""
     print(f"{c}{ts} {msg}{RESET if color else ''}")
+
 def run_cmd(cmd, verbose=False):
     """Run system command silently unless verbose"""
     if verbose:
         log(f"[RUN] {cmd}", "dim", True)
     subprocess.run(cmd, shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+def read_until(ser, timeout=2.0, terminators=(b"OK", b"ERROR")):
+    """Read from the port until a terminator is seen or timeout expires.
+    Robust against boot-time URCs (RDY, +QIND, +CPIN, ...) and command echo:
+    keep accumulating until OK/ERROR actually shows up, instead of grabbing a
+    fixed-size slice that may only contain the preceding unsolicited output."""
+    buf = b""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        chunk = ser.read(256)
+        if chunk:
+            buf += chunk
+            if any(t in buf for t in terminators):
+                break
+    return buf
+
+def at_ok(ser, timeout=2.0):
+    """Return True if the modem acknowledges a bare AT with OK.
+    Flushes pending input first so stale URCs/echo don't mask the reply."""
+    ser.reset_input_buffer()
+    ser.write(b"AT\r")
+    return b"OK" in read_until(ser, timeout)
+
 def find_at_port(verbose=False):
-    """Find first responsive Quectel AT port"""
+    """Find the first responsive Quectel AT port."""
     preferred = ["/dev/ttyUSB2", "/dev/ttyUSB3", "/dev/ttyUSB0", "/dev/ttyUSB1"]
     for port in preferred:
-        if os.path.exists(port):
-            try:
-                with serial.Serial(port, 115200, timeout=0.8) as s:
-                    s.write(b'AT\r')
-                    time.sleep(0.2)
-                    resp = s.read(64)
-                    if b"OK" in resp:
-                        if verbose:
-                            log(f"Port {port} responds OK.", "ok", True)
-                        return port
-            except Exception:
-                continue
+        if not os.path.exists(port):
+            continue
+        try:
+            with serial.Serial(port, 115200, timeout=1) as s:
+                s.reset_input_buffer()
+                s.write(b"ATE0\r")        # disable echo to keep replies clean
+                read_until(s, 1.0)
+                if at_ok(s, 2.0):
+                    if verbose:
+                        log(f"Port {port} responds OK.", "ok", True)
+                    return port
+        except Exception as e:
+            if verbose:
+                log(f"{port}: {e}", "dim", True)   # don't swallow silently
+            continue
     return None
+
 def send_msg(ser, cmd, delay=0.3, verbose=False, color=False):
-    """Send AT command and return the response"""
+    """Send an AT command and return the response (waits for OK/ERROR)."""
     try:
         if verbose:
             log(f"→ {cmd}", "dim", color)
+        ser.reset_input_buffer()
         ser.write((cmd + "\r").encode())
-        time.sleep(delay)
-        resp = ser.read(1024).decode(errors="ignore").strip()
-        return resp
+        return read_until(ser, timeout=max(delay, 1.0)).decode(errors="ignore").strip()
     except Exception as e:
         log(f"⚠️ Write error: {e}", "warn", color)
         return ""
+
 def detect_modem_model(ser, verbose=False, color=False):
     """Detect Quectel modem model via ATI"""
     resp = send_msg(ser, "ATI", 0.4, verbose, color)
@@ -71,6 +103,7 @@ def detect_modem_model(ser, verbose=False, color=False):
             break
     log(f"Detected modem model: {model}", "ok" if model != "Unknown" else "warn", color)
     return model
+
 def switch_to_qmi(qmi_pid, verbose=False, color=False):
     """Switch modem to QMI mode (usb_modeswitch product-id is model-specific)"""
     log(f"Switching modem to QMI mode (pid={qmi_pid})...", "info", color)
@@ -79,24 +112,20 @@ def switch_to_qmi(qmi_pid, verbose=False, color=False):
     time.sleep(3)
     log("Check current driver:", "dim", color)
     os.system("cat /sys/kernel/debug/usb/devices | grep 'Driver=' | grep -vwE 'option|hub'")
+
 def wait_modem_ready(timeout=60, color=False):
-    """Wait until modem AT port responds"""
+    """Wait until the modem AT port responds again after a reset.
+    find_at_port already validates the OK reply, so we don't re-probe here."""
     start = time.time()
     while time.time() - start < timeout:
         port = find_at_port()
         if port:
-            try:
-                with serial.Serial(port, 115200, timeout=1) as s:
-                    s.write(b"AT\r")
-                    time.sleep(0.5)
-                    if b"OK" in s.read(64):
-                        log(f"✅ Modem is back on {port} after {int(time.time()-start)}s.", "ok", color)
-                        return port
-            except Exception:
-                pass
+            log(f"✅ Modem is back on {port} after {int(time.time()-start)}s.", "ok", color)
+            return port
         time.sleep(1)
     log("❌ Modem did not respond after reboot timeout.", "err", color)
     return None
+
 def read_usbnet(at_port, verbose=False, color=False):
     """Read current AT+QCFG="usbnet" value as int, or None if unreadable.
     0 = QMI/RMNET, 1 = ECM, 2 = MBIM."""
@@ -108,15 +137,17 @@ def read_usbnet(at_port, verbose=False, color=False):
         return int(m.group(1)) if m else None
     except Exception:
         return None
+
 def clear_apn_profiles(ser, verbose=False, color=False):
     """Clear all APN profiles"""
     log("🧹 Clearing existing APN profiles...", "info", color)
     for i in range(1, 7):
         send_msg(ser, f"AT+CGDCONT={i}", 0.2, verbose, color)
     log("✅ All APN profiles cleared.", "ok", color)
+
 def configure_dnn_nssai(ser, args, delay=0.4, color=False):
     """Configure DNN/NSSAI — 3GPP compliant for Quectel)"""
-    log("⚙️ Configuring DNN / NSSAI (Fixed on Feb 6, 2026)...", "info", color)
+    log("⚙️ Configuring DNN / NSSAI", "info", color)
     log(f"Set a single APN with DNN {args.dnn}", "info", color)
     send_msg(ser, f'AT+CGDCONT=1,"IP","{args.dnn}"', delay)
     if not args.nssai and not args.nssai2:
@@ -136,6 +167,7 @@ def configure_dnn_nssai(ser, args, delay=0.4, color=False):
             send_msg(ser, f'AT+CGDCONT=3,"IP","{args.dnn2}"', delay)
             log(f"Then set new APN with DNN {args.dnn2} with NSSAI {args.nssai2}", "dim", color)
             send_msg(ser, f'AT+CGDCONT=4,"IP","{args.dnn2}",,,,,,,,,,,,,,1,"{args.nssai2}",', delay)
+
 def main():
     parser = argparse.ArgumentParser(
         description="Quectel Modem Init — unified for RM500Q / RM520N (MBIM) and RG255C (QMI)"
@@ -183,6 +215,12 @@ def main():
     # Mode selection logic (per-model default, overridable with --mode)
     selected_mode = args.mode or cfg["default_mode"]
     log(f"Selected mode: {selected_mode.upper()}", "info", args.color)
+    # Persist the selected mode so start.sh / stop.sh take the right path (mbim|qmi).
+    try:
+        with open("/run/ue-mode", "w") as f:
+            f.write(selected_mode + "\n")
+    except Exception as e:
+        log(f"⚠️ Could not write /run/ue-mode: {e}", "warn", args.color)
     if selected_mode == "qmi":
         switch_to_qmi(cfg["qmi_pid"], args.verbose, args.color)
         ser.close()
@@ -191,6 +229,7 @@ def main():
         if not at_port:
             return
         ser = serial.Serial(at_port, 115200, timeout=1)
+        send_msg(ser, "ATE0", 0.2, args.verbose, args.color)
         log("✅ QMI mode active.", "ok", args.color)
     else:
         log("✅ Keeping MBIM mode.", "ok", args.color)
@@ -204,7 +243,7 @@ def main():
     if args.nr5g_band:
         log(f"⚙️ Setting NR5G bands ({args.nr5g_band})...", "info", args.color)
         send_msg(ser, f'AT+QNWPREFCFG="nr5g_band",{args.nr5g_band}', 0.3, args.verbose, args.color)
-    # --- SURGICAL FIX #1: enforce the USB composition matching the selected mode ---
+    # --- Enforce the USB composition matching the selected mode ---
     # The modem may be stuck in a previous composition (e.g. usbnet=0/QMI while MBIM
     # is desired). We set the correct usbnet value here; the CFUN=1,1 reboot right
     # below re-enumerates USB so the change takes effect in a single reboot.
@@ -218,7 +257,6 @@ def main():
         send_msg(ser, f'AT+QCFG="usbnet",{target_usbnet}', 0.3, args.verbose, args.color)
     else:
         log(f"✅ usbnet already {current_usbnet} ({selected_mode.upper()}).", "ok", args.color)
-    # --- end fix #1 ---
     log("♻️ Restarting modem (CFUN=1,1)...", "info", args.color)
     send_msg(ser, "AT+CFUN=1,1", 0.1, args.verbose, args.color)
     ser.close()
@@ -227,44 +265,41 @@ def main():
         return
     time.sleep(5)
     log("⏳ Waiting for AT port to stabilize...", "info", args.color)
-    stable_start = time.time()
     stable = False
-    while time.time() - stable_start < 90:
-        try:
-            with serial.Serial(at_port, 115200, timeout=1) as ser:
-                ser.write(b"AT\r")
-                time.sleep(0.5)
-                resp = ser.read(32).decode(errors="ignore")
-                if "OK" in resp:
-                    stable = True
-                    break
-        except Exception:
-            pass
-        time.sleep(2)
+    ser = None
+    try:
+        ser = serial.Serial(at_port, 115200, timeout=1)
+        ser.write(b"ATE0\r"); time.sleep(0.3)   # echo off once, then keep port OPEN
+        ser.reset_input_buffer()
+        stable_start = time.time()
+        while time.time() - stable_start < 90:
+            if at_ok(ser, 2.0):                 # flush + read-until-OK inside
+                stable = True
+                break
+            time.sleep(2)
+    except Exception as e:
+        log(f"⚠️ Stabilization error: {e}", "warn", args.color)
     if not stable:
         log("❌ Port never stabilized.", "err", args.color)
+        if ser:
+            ser.close()
         return
     log(f"✅ Stable AT communication on {at_port}.", "ok", args.color)
     log("📋 Final DNN/NSSAI configuration:", "info", args.color)
     try:
-        ser = serial.Serial(at_port, 115200, timeout=1)
-        for _ in range(6):
-            ser.write(b"AT+CGDCONT?\r")
-            time.sleep(0.5)
-            resp = ser.read(512).decode(errors="ignore").strip()
-            if "+CGDCONT" in resp:
-                log(resp, "dim", args.color)
-                break
-            time.sleep(1)
-        ser.close()
+        resp = send_msg(ser, "AT+CGDCONT?", 1.0, args.verbose, args.color)
+        if "+CGDCONT" in resp:
+            log(resp, "dim", args.color)
     except Exception as e:
         log(f"⚠️ Could not read final config: {e}", "warn", args.color)
-        return
+    finally:
+        if ser:
+            ser.close()
     # === Extra MBIM re-initialization sequence ===
     if selected_mode == "mbim":
         log("📡 MBIM mode selected — performing extended radio reset procedure", "info", args.color)
         DEVICE = "/dev/cdc-wdm0"
-        # --- SURGICAL FIX #2: make sure MBIM is actually present before using mbimcli ---
+        # --- make sure MBIM is actually present before using mbimcli ---
         # If the reboot did not land us in MBIM (usbnet still != 2), re-initialize the
         # MBIM composition once (set usbnet=2 + reboot), then re-verify. Abort cleanly
         # rather than firing mbimcli calls that would only "Transaction timed out".
@@ -294,7 +329,6 @@ def main():
         if not os.path.exists(DEVICE):
             log(f"❌ {DEVICE} not present; cannot run MBIM radio cycle.", "err", args.color)
             return
-        # --- end fix #2 ---
         # 1. Switch off radio
         log(f"---- mbimcli -p -d {DEVICE} --set-radio-state=off", "dim", args.color)
         os.system(f"mbimcli -p -d {DEVICE} --set-radio-state=off")
@@ -310,7 +344,18 @@ def main():
         # 4. Switch radio OFF
         log(f"---- mbimcli -p -d {DEVICE} --set-radio-state=off", "dim", args.color)
         os.system(f"mbimcli -p -d {DEVICE} --set-radio-state=off")
-        log("📶 MBIM radio cycle done — you can now use mbim-based start.sh/stop.sh", "ok", args.color)
+        log("📶 MBIM radio cycle done — you can now use start.sh/stop.sh", "ok", args.color)
+    # === QMI: leave the UE detached until start.sh ===
+    if selected_mode == "qmi":
+        # Keep the UE detached (CFUN=0) after init so a QMI modem does not attach
+        # to the gNB before start.sh. start.sh issues wup to attach.
+        log("Detaching UE (CFUN=0) — QMI idle until start.sh...", "info", args.color)
+        try:
+            with serial.Serial(at_port, 115200, timeout=1) as s:
+                send_msg(s, "AT+CFUN=0", 0.3, args.verbose, args.color)
+        except Exception as e:
+            log(f"⚠️ Could not detach: {e}", "warn", args.color)
     log("✅ Initialization complete.", "ok", args.color)
+
 if __name__ == "__main__":
     main()

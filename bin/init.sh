@@ -1,7 +1,7 @@
 #!/bin/bash
-# This script aims to initialize the Quectel RM 500Q-GL device
+# This script aims to initialize the Quectel RM500Q-GL and RM520N devices
 # It has to be run once the device is switched on
-# Else, it may not be able to connect correctly to OAI5G gNB
+# Else, it may not be able to attach to the gNB
 
 
 DEVICE=/dev/cdc-wdm0

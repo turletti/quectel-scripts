@@ -5,6 +5,25 @@
 DEVICE=/dev/cdc-wdm0
 INTERFACE=${INTERFACE:-wwan0}
 #DNN1=ims
+
+# --- UE mode (mbim|qmi): default from qhat-init state file ---
+MODE="$(cat /run/ue-mode 2>/dev/null || echo mbim)"
+FULL=false
+for arg in "$@"; do
+    case "$arg" in
+        --mode=*) MODE="${arg#*=}";;
+        --full)   FULL=true;;  # also stop the background quectel-CM
+    esac
+done
+
+if [[ "$MODE" == "qmi" ]]; then
+    source qmi-net.sh
+    qmi_detach
+    $FULL && qmi_stop_cm
+    exit 0
+fi
+# --- MBIM path ---
+
 echo "---- mbimcli -d ${DEVICE} -p --disconnect=0"
 ## Problem with oai-gnb develop branch can not do PDU session release meanwhile we don't do PDU session release
 #mbimcli -d $DEVICE -p --disconnect=0

@@ -1,6 +1,15 @@
 #!/bin/bash
 
 set-ue-mode --mode=mbim
-usb_modeswitch -v 0x2c7c -p 0x0800 -R
+
+# Reset whatever Quectel is currently on the bus: read its real product id
+# instead of hardcoding one (RM500Q=0800, RM520N=0801, RG255C=0316, ...).
+pid=$(lsusb -d 2c7c: | grep -oE '2c7c:[0-9a-fA-F]{4}' | head -n1 | cut -d: -f2)
+if [[ -n "$pid" ]]; then
+    usb_modeswitch -v 0x2c7c -p "0x$pid" -R
+else
+    echo "No Quectel (2c7c) device on USB — skipping usb_modeswitch reset"
+fi
+
 echo "check current loaded driver"
 cat /sys/kernel/debug/usb/devices|grep 'Driver='|grep -vwE 'option|hub'

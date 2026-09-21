@@ -61,4 +61,13 @@ else
 fi
 sleep 5
 check-ue
-init.sh
+# init.sh runs a pure-MBIM radio cycle (set-radio-state off/on/off via mbimcli on
+# /dev/cdc-wdm0). It only applies to MBIM modems (RM500Q-GL / RM520N-GL). The RG255C
+# runs in QMI, where MBIM is unavailable, so gate on the actual capability rather than
+# on the model: run init.sh only if mbimcli can really reach the modem.
+if [[ -e /dev/cdc-wdm0 ]] && mbimcli -p -d /dev/cdc-wdm0 --query-device-caps >/dev/null 2>&1; then
+    init.sh
+else
+    echo "MBIM unavailable (QMI mode / RG255C) — skipping init.sh"
+fi
+
