@@ -133,8 +133,14 @@ def configure_dnn_nssai(ser, args, delay=0.4, color=False):
     log(f"Set a single APN with DNN {args.dnn}", "info", color)
     send_msg(ser, f'AT+CGDCONT=1,"IP","{args.dnn}"', delay)
     if not args.nssai and not args.nssai2:
-        log("No specific NSSAI set and single DNN", "dim", color)
-        send_msg(ser, "AT+CGDCONT=2", delay)
+        log("No specific NSSAI set", "dim", color)
+        # No slicing: CID 2 is free, so the second DNN (if any) goes there (CID 1 + CID 2),
+        # keeping the profiles contiguous. CID 3 stays cleared.
+        if args.dnn2:
+            log(f"Set second APN (CID 2) with DNN {args.dnn2}", "dim", color)
+            send_msg(ser, f'AT+CGDCONT=2,"IP","{args.dnn2}"', delay)
+        else:
+            send_msg(ser, "AT+CGDCONT=2", delay)
         send_msg(ser, "AT+CGDCONT=3", delay)
         return
     if args.nssai:
@@ -194,6 +200,11 @@ def main():
     send_msg(ser, "ATE0", 0.2, args.verbose, args.color)
     model = detect_modem_model(ser, args.verbose, args.color)
     cfg = MODEL_CONFIG.get(model, MODEL_CONFIG["Unknown"])
+    # RedCap modems (RG255C) get a second PDU session for IMS by default,
+    # unless --dnn2 was passed explicitly on the command line.
+    if model == "RG255C" and args.dnn2 is None:
+        args.dnn2 = "ims"
+        log("RG255C (RedCap) — enabling second PDU session --dnn2=ims", "info", args.color)
     # Mode selection logic (per-model default, overridable with --mode)
     selected_mode = args.mode or cfg["default_mode"]
     log(f"Selected mode: {selected_mode.upper()}", "info", args.color)
