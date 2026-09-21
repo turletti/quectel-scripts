@@ -250,16 +250,17 @@ def main():
     stable_start = time.time()
     stable = False
     while time.time() - stable_start < 90:
-        try:
-            with serial.Serial(at_port, 115200, timeout=1) as ser:
-                ser.write(b"AT\r")
-                time.sleep(0.5)
-                resp = ser.read(32).decode(errors="ignore")
-                if "OK" in resp:
-                    stable = True
-                    break
-        except Exception:
-            pass
+        # Re-probe instead of trusting the old at_port: after a CFUN=1,1 reboot the
+        # AT port index can move (seen on RG255C/QMI, e.g. ttyUSB2 -> ttyUSB3 -> ...
+        # as qmi_wwan_q recomposes the interfaces). find_at_port() opens each
+        # candidate and validates the OK reply itself, so it follows the modem.
+        p = find_at_port(args.verbose)
+        if p:
+            if p != at_port:
+                log(f"AT port moved: {at_port} → {p}", "warn", args.color)
+            at_port = p
+            stable = True
+            break
         time.sleep(2)
     if not stable:
         log("❌ Port never stabilized.", "err", args.color)
