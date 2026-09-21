@@ -38,57 +38,33 @@ def run_cmd(cmd, verbose=False):
         log(f"[RUN] {cmd}", "dim", True)
     subprocess.run(cmd, shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-def read_until(ser, timeout=2.0, terminators=(b"OK", b"ERROR")):
-    """Read from the port until a terminator is seen or timeout expires.
-    Robust against boot-time URCs (RDY, +QIND, +CPIN, ...) and command echo:
-    keep accumulating until OK/ERROR actually shows up, instead of grabbing a
-    fixed-size slice that may only contain the preceding unsolicited output."""
-    buf = b""
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        chunk = ser.read(256)
-        if chunk:
-            buf += chunk
-            if any(t in buf for t in terminators):
-                break
-    return buf
-
-def at_ok(ser, timeout=2.0):
-    """Return True if the modem acknowledges a bare AT with OK.
-    Flushes pending input first so stale URCs/echo don't mask the reply."""
-    ser.reset_input_buffer()
-    ser.write(b"AT\r")
-    return b"OK" in read_until(ser, timeout)
-
 def find_at_port(verbose=False):
-    """Find the first responsive Quectel AT port."""
+    """Find first responsive Quectel AT port"""
     preferred = ["/dev/ttyUSB2", "/dev/ttyUSB3", "/dev/ttyUSB0", "/dev/ttyUSB1"]
     for port in preferred:
-        if not os.path.exists(port):
-            continue
-        try:
-            with serial.Serial(port, 115200, timeout=1) as s:
-                s.reset_input_buffer()
-                s.write(b"ATE0\r")        # disable echo to keep replies clean
-                read_until(s, 1.0)
-                if at_ok(s, 2.0):
-                    if verbose:
-                        log(f"Port {port} responds OK.", "ok", True)
-                    return port
-        except Exception as e:
-            if verbose:
-                log(f"{port}: {e}", "dim", True)   # don't swallow silently
-            continue
+        if os.path.exists(port):
+            try:
+                with serial.Serial(port, 115200, timeout=0.8) as s:
+                    s.write(b'AT\r')
+                    time.sleep(0.2)
+                    resp = s.read(64)
+                    if b"OK" in resp:
+                        if verbose:
+                            log(f"Port {port} responds OK.", "ok", True)
+                        return port
+            except Exception:
+                continue
     return None
 
 def send_msg(ser, cmd, delay=0.3, verbose=False, color=False):
-    """Send an AT command and return the response (waits for OK/ERROR)."""
+    """Send AT command and return the response"""
     try:
         if verbose:
             log(f"→ {cmd}", "dim", color)
-        ser.reset_input_buffer()
         ser.write((cmd + "\r").encode())
-        return read_until(ser, timeout=max(delay, 1.0)).decode(errors="ignore").strip()
+        time.sleep(delay)
+        resp = ser.read(1024).decode(errors="ignore").strip()
+        return resp
     except Exception as e:
         log(f"⚠️ Write error: {e}", "warn", color)
         return ""
@@ -114,14 +90,20 @@ def switch_to_qmi(qmi_pid, verbose=False, color=False):
     os.system("cat /sys/kernel/debug/usb/devices | grep 'Driver=' | grep -vwE 'option|hub'")
 
 def wait_modem_ready(timeout=60, color=False):
-    """Wait until the modem AT port responds again after a reset.
-    find_at_port already validates the OK reply, so we don't re-probe here."""
+    """Wait until modem AT port responds"""
     start = time.time()
     while time.time() - start < timeout:
         port = find_at_port()
         if port:
-            log(f"✅ Modem is back on {port} after {int(time.time()-start)}s.", "ok", color)
-            return port
+            try:
+                with serial.Serial(port, 115200, timeout=1) as s:
+                    s.write(b"AT\r")
+                    time.sleep(0.5)
+                    if b"OK" in s.read(64):
+                        log(f"✅ Modem is back on {port} after {int(time.time()-start)}s.", "ok", color)
+                        return port
+            except Exception:
+                pass
         time.sleep(1)
     log("❌ Modem did not respond after reboot timeout.", "err", color)
     return None
@@ -265,36 +247,39 @@ def main():
         return
     time.sleep(5)
     log("⏳ Waiting for AT port to stabilize...", "info", args.color)
+    stable_start = time.time()
     stable = False
-    ser = None
-    try:
-        ser = serial.Serial(at_port, 115200, timeout=1)
-        ser.write(b"ATE0\r"); time.sleep(0.3)   # echo off once, then keep port OPEN
-        ser.reset_input_buffer()
-        stable_start = time.time()
-        while time.time() - stable_start < 90:
-            if at_ok(ser, 2.0):                 # flush + read-until-OK inside
-                stable = True
-                break
-            time.sleep(2)
-    except Exception as e:
-        log(f"⚠️ Stabilization error: {e}", "warn", args.color)
+    while time.time() - stable_start < 90:
+        try:
+            with serial.Serial(at_port, 115200, timeout=1) as ser:
+                ser.write(b"AT\r")
+                time.sleep(0.5)
+                resp = ser.read(32).decode(errors="ignore")
+                if "OK" in resp:
+                    stable = True
+                    break
+        except Exception:
+            pass
+        time.sleep(2)
     if not stable:
         log("❌ Port never stabilized.", "err", args.color)
-        if ser:
-            ser.close()
         return
     log(f"✅ Stable AT communication on {at_port}.", "ok", args.color)
     log("📋 Final DNN/NSSAI configuration:", "info", args.color)
     try:
-        resp = send_msg(ser, "AT+CGDCONT?", 1.0, args.verbose, args.color)
-        if "+CGDCONT" in resp:
-            log(resp, "dim", args.color)
+        ser = serial.Serial(at_port, 115200, timeout=1)
+        for _ in range(6):
+            ser.write(b"AT+CGDCONT?\r")
+            time.sleep(0.5)
+            resp = ser.read(512).decode(errors="ignore").strip()
+            if "+CGDCONT" in resp:
+                log(resp, "dim", args.color)
+                break
+            time.sleep(1)
+        ser.close()
     except Exception as e:
         log(f"⚠️ Could not read final config: {e}", "warn", args.color)
-    finally:
-        if ser:
-            ser.close()
+        return
     # === Extra MBIM re-initialization sequence ===
     if selected_mode == "mbim":
         log("📡 MBIM mode selected — performing extended radio reset procedure", "info", args.color)

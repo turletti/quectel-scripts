@@ -6,7 +6,7 @@ Configuration scripts for Quectel modules (5G UE) on R2lab FIT nodes.
 
 ```bash
 git clone https://github.com/turletti/quectel-scripts.git /opt/quectel-scripts
-cd quectel-scripts
+cd /opt/quectel-scripts
 make install        # copies bin/* into /usr/local/bin
 ```
 
