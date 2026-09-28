@@ -69,6 +69,19 @@ DNN_TYPE1=${DNN_TYPE1:-ipv4v6}
 INTERFACE=${INTERFACE:-wwan0}
 DEVICE=/dev/cdc-wdm0
 
+# Resolve the MBIM access string for a DNN. On Quectel RM500Q/Rm520N, a context
+# carrying an S-NSSAI is renamed by the firmware to "<dnn>_<SST-name><SD>"
+# (e.g. streaming_EMBB100000), and CID 1 cannot carry an S-NSSAI. Connecting
+# with the plain DNN then selects CID 1 and the request goes out without
+# S-NSSAI. Prefer the slice-carrying context when one exists for this DNN;
+# otherwise keep the plain DNN (unchanged behaviour for UEs without slice).
+resolve_access_string() {
+    local dnn="$1" sliced
+    sliced=$(mbimcli -p -d "$DEVICE" --query-provisioned-contexts 2>/dev/null \
+        | awk -F"'" -v p="${dnn}_" '/Access string:/ && index($2, p) == 1 {print $2; exit}') || true
+    echo "${sliced:-$dnn}"
+}
+
 echo "-------Setting up $INTERFACE for testing-------"
 ifconfig $INTERFACE up
 
@@ -82,14 +95,20 @@ mbimcli -p -d $DEVICE --set-radio-state=on
 sleep 2
 echo "---- mbimcli -p -d ${DEVICE} --attach-packet-service"
 mbimcli -p -d $DEVICE --attach-packet-service
-echo "---- mbimcli -p -d ${DEVICE} --connect=session-id=0,access-string=${DNN0},ip-type=${DNN_TYPE0}"
-mbimcli -p -d $DEVICE --connect=session-id=0,access-string=$DNN0,ip-type=$DNN_TYPE0
+#echo "---- mbimcli -p -d ${DEVICE} --connect=session-id=0,access-string=${DNN0},ip-type=${DNN_TYPE0}"
+#mbimcli -p -d $DEVICE --connect=session-id=0,access-string=$DNN0,ip-type=$DNN_TYPE0
+ACCESS0=$(resolve_access_string "$DNN0")
+echo "---- mbimcli -p -d ${DEVICE} --connect=session-id=0,access-string=${ACCESS0},ip-type=${DNN_TYPE0}"
+mbimcli -p -d $DEVICE --connect=session-id=0,access-string=$ACCESS0,ip-type=$DNN_TYPE0
 echo "---- mbim-set-ip.sh ${DEVICE} ${INTERFACE} 0"
 mbim-set-ip.sh $DEVICE $INTERFACE 0
 
 if [[ -v DNN1 ]]; then echo "---- mbimcli -p -d ${DEVICE} --connect=session-id=1,access-string=${DNN1},ip-type=${DNN_TYPE1}"; fi
-if [[ -v DNN1 ]]; then mbimcli -p -d $DEVICE --connect=session-id=1,access-string=$DNN1,ip-type=$DNN_TYPE1; fi
-if [[ -v DNN1 ]]; then echo "---- mbim-set-ip.sh ${DEVICE} ${INTERFACE}.1 1"; fi
+#if [[ -v DNN1 ]]; then mbimcli -p -d $DEVICE --connect=session-id=1,access-string=$DNN1,ip-type=$DNN_TYPE1; fi
+#if [[ -v DNN1 ]]; then echo "---- mbim-set-ip.sh ${DEVICE} ${INTERFACE}.1 1"; fi
+if [[ -v DNN1 ]]; then ACCESS1=$(resolve_access_string "$DNN1"); fi
+if [[ -v DNN1 ]]; then echo "---- mbimcli -p -d ${DEVICE} --connect=session-id=1,access-string=${ACCESS1},ip-type=${DNN_TYPE1}"; fi
+if [[ -v DNN1 ]]; then mbimcli -p -d $DEVICE --connect=session-id=1,access-string=$ACCESS1,ip-type=$DNN_TYPE1; fi
 if [[ -v DNN1 ]]; then mbim-set-ip.sh $DEVICE $INTERFACE.1 1; fi
 
 DNN0_IPADDRESS=$(ip -f inet addr show $INTERFACE | awk '/inet / {print $2}')
