@@ -70,8 +70,8 @@ class qtel_ctl:
         time.sleep(3)
         self.__set_modem_state(self.modem,'1')
 
-    def detach(self):#sending AT+CFUN=0
-        self.__set_modem_state(self.modem,'0')
+    def detach(self):#sending AT+CFUN=4: RF off and network detach, SIM kept powered (IMSI stays readable)
+        self.__set_modem_state(self.modem,'4')
 
 
 if __name__ == "__main__":
